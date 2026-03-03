@@ -22,8 +22,9 @@ CURRENT_STAGE="boot"
 
 ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 # URLs separados para permitir override vía env si Google actualiza versiones
-CMDLINE_TOOLS_URL_LINUX="${CMDLINE_TOOLS_URL_LINUX:-https://dl.google.com/android/repository/commandlinetools-linux-11560868_latest.zip}"
-CMDLINE_TOOLS_URL_DARWIN="${CMDLINE_TOOLS_URL_DARWIN:-https://dl.google.com/android/repository/commandlinetools-mac-11560868_latest.zip}"
+CMDLINE_TOOLS_VERSION_DEFAULT="12266719"
+CMDLINE_TOOLS_URL_LINUX="${CMDLINE_TOOLS_URL_LINUX:-https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION_DEFAULT}_latest.zip}"
+CMDLINE_TOOLS_URL_DARWIN="${CMDLINE_TOOLS_URL_DARWIN:-https://dl.google.com/android/repository/commandlinetools-mac-${CMDLINE_TOOLS_VERSION_DEFAULT}_latest.zip}"
 
 # Logs a stderr para no contaminar salidas capturadas
 log()  { >&2 printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
@@ -180,18 +181,129 @@ ensure_java() {
   esac
 }
 
+validate_cmdline_url() {
+  # Valida forma básica y dominio oficial para cmdline-tools; devuelve 0 si coincide patrón oficial.
+  local url="$1"
+  local origin="$2"
+  local expected_re='^https://dl\.google\.com/android/repository/commandlinetools-(mac|linux)-[0-9]+_latest\.zip$'
+
+  if [[ -z "$url" ]]; then
+    warn "URL de cmdline-tools vacía (origen=${origin})."
+    return 1
+  fi
+
+  if [[ ! "$url" =~ ^https?:// ]]; then
+    warn "URL de cmdline-tools sin esquema http/https (origen=${origin}): $url"
+    return 1
+  fi
+
+  if [[ "$url" =~ ^https?://d1\.google\.com ]]; then
+    warn "Dominio d1.google.com no es el oficial de descargas; podría fallar (origen=${origin})."
+  fi
+
+  if [[ ! "$url" =~ commandline ]]; then
+    warn "La URL no contiene 'commandline' en el nombre esperado (origen=${origin}): $url"
+    return 1
+  fi
+
+  if [[ "$url" =~ $expected_re ]]; then
+    return 0
+  fi
+
+  warn "La URL no coincide con el patrón oficial esperado (origen=${origin}): $url"
+  return 1
+}
+
 download_cmdline_tools() {
-  local url dest tmpdir
+  local primary_url fallback_url dynamic_url tmpdir dest http_code stderr_file attempt_url size_bytes
   tmpdir="$(mktemp -d)"
   case "$OS_TYPE" in
-    macos) url="$CMDLINE_TOOLS_URL_DARWIN" ;;
-    ubuntu|linux|wsl) url="$CMDLINE_TOOLS_URL_LINUX" ;;
-    *) err "SO no soportado para descarga automática de cmdline-tools"; exit 1 ;;
+    macos)
+      primary_url="$CMDLINE_TOOLS_URL_DARWIN"
+      fallback_url="https://dl.google.com/android/repository/commandlinetools-mac-${CMDLINE_TOOLS_VERSION_DEFAULT}_latest.zip"
+      ;;
+    ubuntu|linux|wsl)
+      primary_url="$CMDLINE_TOOLS_URL_LINUX"
+      fallback_url="https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION_DEFAULT}_latest.zip"
+      ;;
+    *)
+      err "SO no soportado para descarga automática de cmdline-tools"
+      exit 1
+      ;;
   esac
+
   dest="$tmpdir/cmdline-tools.zip"
-  log "Descargando cmdline-tools desde $url..."
-  curl -fsSL "$url" -o "$dest"
-  printf "%s\n" "$dest"   # solo la ruta por stdout
+  stderr_file="$tmpdir/curl.stderr"
+
+  # Lista de intentos: override/env, dinámica de repository2-1.xml y fallback conocido.
+  local attempts=("$primary_url")
+
+  # Intento dinámico: descubrir la última versión publicada en repository2-1.xml
+  resolve_latest_cmdline_url_for_os() {
+    local os_tag="$1" tmp xml_url resolved
+    tmp="$(mktemp)"
+    xml_url="https://dl.google.com/android/repository/repository2-1.xml"
+    if curl -fsSL --connect-timeout 10 --max-time 25 "$xml_url" -o "$tmp"; then
+      resolved="$(
+        grep -o "commandlinetools-${os_tag}-[0-9]\\+_latest.zip" "$tmp" \
+        | sort -t'-' -k3,3Vr \
+        | head -n1
+      )"
+      rm -f "$tmp"
+      if [[ -n "$resolved" ]]; then
+        printf "https://dl.google.com/android/repository/%s" "$resolved"
+        return 0
+      fi
+    fi
+    rm -f "$tmp"
+    return 1
+  }
+
+  if dynamic_url="$(resolve_latest_cmdline_url_for_os "$([[ "$OS_TYPE" == "macos" ]] && echo "mac" || echo "linux")")"; then
+    if [[ "$dynamic_url" != "$primary_url" && "$dynamic_url" != "$fallback_url" ]]; then
+      log "URL dinámica detectada para cmdline-tools: $dynamic_url"
+      attempts+=("$dynamic_url")
+    fi
+  else
+    warn "No se pudo resolver URL dinámica desde repository2-1.xml; usando fallback conocido."
+  fi
+
+  if [[ "$fallback_url" != "$primary_url" && -n "$fallback_url" ]]; then
+    attempts+=("$fallback_url")
+  fi
+
+  local total_attempts="${#attempts[@]}"
+  local idx
+
+  for idx in "${!attempts[@]}"; do
+    attempt_url="${attempts[$idx]}"
+    [[ -z "$attempt_url" ]] && continue
+
+    if validate_cmdline_url "$attempt_url" "env/default"; then
+      log "Descargando cmdline-tools desde $attempt_url..."
+    else
+      warn "URL de cmdline-tools no parece oficial: $attempt_url (origen=env/default). Intentando descarga igualmente."
+    fi
+
+    http_code="$(curl -w '%{http_code}' -L --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 300 -o "$dest" "$attempt_url" 2>"$stderr_file" || true)"
+
+    if [[ "$http_code" == "200" && -s "$dest" ]]; then
+      size_bytes="$(wc -c <"$dest" | tr -d ' ')"
+      log "Descarga completada (HTTP $http_code, ${size_bytes} bytes) -> $dest"
+      printf "%s\n" "$dest"   # solo la ruta por stdout
+      return
+    fi
+
+    warn "Descarga falló (HTTP ${http_code:-?}) desde $attempt_url"
+    warn "Detalle curl: $(tr '\n' ' ' < "$stderr_file")"
+
+    if (( idx + 1 < total_attempts )); then
+      warn "Probando URL alternativa conocida para cmdline-tools..."
+    fi
+  done
+
+  err "No se pudo descargar cmdline-tools tras probar URLs (último intento: ${attempt_url:-?}). Define CMDLINE_TOOLS_URL_DARWIN/CMDLINE_TOOLS_URL_LINUX o revisa conectividad."
+  exit 1
 }
 
 install_cmdline_tools() {
@@ -203,9 +315,28 @@ install_cmdline_tools() {
   mkdir -p "$ANDROID_HOME/cmdline-tools"
   local zip_path
   zip_path="$(download_cmdline_tools)"
+  if [[ -z "$zip_path" ]]; then
+    err "Descarga de cmdline-tools devolvió una ruta vacía."
+    exit 1
+  fi
+  if [[ ! -f "$zip_path" ]]; then
+    err "El archivo de cmdline-tools no se encontró en $zip_path. Revisa permisos o antivirus."
+    exit 1
+  fi
+  if [[ ! -s "$zip_path" ]]; then
+    err "El archivo descargado está vacío ($zip_path). Verifica la URL o la conectividad."
+    exit 1
+  fi
   local tmpdir
   tmpdir="$(mktemp -d)"
-  unzip -q "$zip_path" -d "$tmpdir"
+  if ! unzip -q "$zip_path" -d "$tmpdir"; then
+    err "Fallo al descomprimir cmdline-tools desde $zip_path. Puedes reintentar definiendo CMDLINE_TOOLS_URL_DARWIN/CMDLINE_TOOLS_URL_LINUX."
+    exit 1
+  fi
+  if [[ ! -d "$tmpdir/cmdline-tools" ]]; then
+    err "El ZIP descargado no contiene la carpeta cmdline-tools esperada. Archivo: $zip_path"
+    exit 1
+  fi
   # Google distribuye como cmdline-tools; lo movemos a latest
   mv "$tmpdir/cmdline-tools" "$target"
   log "cmdline-tools instalado en $target"
