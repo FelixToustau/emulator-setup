@@ -234,10 +234,16 @@ install_sdk_components() {
   local platform="platforms;android-${API_LEVEL}"
   local sys_image="system-images;android-${API_LEVEL};google_apis;${ABI}"
   log "Instalando componentes SDK (platform-tools, emulator, ${platform}, ${sys_image})..."
-  yes | sdkmanager "platform-tools" "emulator" "$platform" "$sys_image" || {
-    err "sdkmanager falló instalando componentes. Revisa conectividad y permisos."
-    exit 1
-  }
+  # sdkmanager a veces devuelve 141 (SIGPIPE) pese a instalar correctamente. Permitimos 0 o 141.
+  if ! yes | sdkmanager "platform-tools" "emulator" "$platform" "$sys_image"; then
+    local code=$?
+    if [[ $code -eq 141 ]]; then
+      warn "sdkmanager terminó con código 141 (SIGPIPE) pero puede haber instalado paquetes; continuando."
+    else
+      err "sdkmanager falló instalando componentes (exit=$code). Revisa conectividad y permisos."
+      exit $code
+    fi
+  fi
 }
 
 list_system_images() {
