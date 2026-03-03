@@ -400,10 +400,13 @@ list_system_images() {
 }
 
 pick_device_id() {
-  # Elige un dispositivo válido de avdmanager; prioriza Pixel.
   local device_list chosen
   device_list="$(avdmanager list device | awk -F '[: ]+' '/id:/{print $2}' | tr -d ' ')"
-  chosen="$(echo "$device_list" | grep -E '^pixel' | head -n1 || true)"
+  # Prioriza Pixel 6/7 phone; evita tablets
+  chosen="$(echo "$device_list" | grep -E '^pixel_6$|^pixel_7' | head -n1 || true)"
+  if [[ -z "$chosen" ]]; then
+    chosen="$(echo "$device_list" | grep -E '^pixel' | grep -vi 'tablet' | head -n1 || true)"
+  fi
   if [[ -z "$chosen" ]]; then
     chosen="$(echo "$device_list" | head -n1 || true)"
   fi
@@ -421,7 +424,14 @@ create_avd() {
     log "AVD ${AVD_NAME} ya existe; se reutiliza."
     return
   fi
-  pick_device_id
+
+  # Solo elegir automáticamente si no se especificó device
+  if [[ -z "${DEVICE_ID:-}" || "${DEVICE_ID}" == "auto" ]]; then
+    pick_device_id
+  else
+    log "Usando dispositivo ${DEVICE_ID}"
+  fi
+  
   local sys_image="system-images;android-${API_LEVEL};google_apis;${ABI}"
   log "Creando AVD ${AVD_NAME} (${sys_image}, device ${DEVICE_ID})..."
   if ! echo "no" | avdmanager create avd \
