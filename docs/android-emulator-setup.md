@@ -17,7 +17,7 @@ chmod +x scripts/android-emulator-setup.sh
 - `--avd-name NAME` nombre del AVD (default `pixel6-api34`).
 - `--api-level N` nivel de API (default `34`).
 - `--device ID` dispositivo de `avdmanager` (default `pixel_6`).
-- `--abi ABI` ABI de la imagen (default `x86_64`).
+- `--abi ABI` ABI de la imagen (default auto: `arm64-v8a` en ARM/Apple Silicon/Windows ARM, `x86_64` en Intel).
 - `--headless` inicia el emulador sin ventana (`-no-window`).
 - `--start` arranca el emulador tras la instalación/creación del AVD.
 - `--list-system-images` lista imágenes disponibles y termina.
@@ -42,9 +42,13 @@ Variables útiles:
   ```
 
 ## Notas por sistema operativo
-- **macOS**: usa Homebrew para instalar Java si no está presente. El SDK se coloca en `~/Android/Sdk`.
-- **Ubuntu/WSL**: instala OpenJDK 17 y dependencias gráficas mínimas (`libglu1-mesa`, `libpulse0`). En WSL, el emulador gráfico puede requerir WSLg; en headless funciona con `--headless`.
+- **macOS**: usa Homebrew para instalar Java si no está presente. Si existe `~/Library/Android/sdk`, se usa como SDK por defecto; si no, `~/Android/Sdk`. En Apple Silicon se selecciona `arm64-v8a` por defecto.
+- **Ubuntu/WSL**: instala OpenJDK 17 y dependencias gráficas mínimas (`libglu1-mesa`, `libpulse0`). En WSL, el emulador gráfico puede requerir WSLg; en headless funciona con `--headless`. En hosts ARM elegirá `arm64-v8a`.
 - **Otras distros**: se intentará con `apt`; si no es Ubuntu, instala manualmente Java 17+ y dependencias gráficas equivalentes.
+
+## Cómo se elige el dispositivo y la ABI
+- ABI: si no especificas `--abi`, el script detecta la arquitectura y usa `arm64-v8a` en ARM y `x86_64` en Intel.
+- Device: se elige automáticamente el primer dispositivo Pixel disponible desde `avdmanager list device`; si no hay Pixel, el primero de la lista.
 
 ## Archivos y rutas importantes
 - SDK y AVDs: `~/Android/Sdk` (configurable con `ANDROID_HOME`).
