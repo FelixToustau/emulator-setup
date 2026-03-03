@@ -158,9 +158,202 @@ ensure_homebrew() {
   log "Homebrew instalado. Reinicia tu shell si los binarios no son visibles."
 }
 
+setup_java_home() {
+  # Función auxiliar para validar que JAVA_HOME sea una ruta válida de JDK
+  validate_java_home() {
+    local jhome="$1"
+    if [[ -z "$jhome" ]]; then
+      return 1
+    fi
+    # Rechazar rutas del sistema
+    if [[ "$jhome" == "/usr" || "$jhome" == "/bin" || "$jhome" == "/usr/bin" ]]; then
+      return 1
+    fi
+    # Debe tener bin/java ejecutable
+    if [[ ! -x "$jhome/bin/java" ]]; then
+      return 1
+    fi
+    # Debe tener lib/ o jre/ (estructura de JDK)
+    # En macOS, algunos JDKs tienen Contents/Home, pero si estamos validando JAVA_HOME
+    # ya debería apuntar a Contents/Home directamente
+    if [[ -d "$jhome/lib" || -d "$jhome/jre" ]]; then
+      return 0
+    fi
+    return 1
+  }
+  
+  # Si JAVA_HOME ya está configurado y es válido, usarlo
+  if [[ -n "${JAVA_HOME:-}" ]] && validate_java_home "$JAVA_HOME"; then
+    log "JAVA_HOME ya configurado: $JAVA_HOME"
+    export JAVA_HOME
+    return
+  fi
+
+  # Intentar detectar JAVA_HOME según el SO
+  case "$OS_TYPE" in
+    macos)
+      # macOS tiene una utilidad para encontrar Java
+      if [[ -x /usr/libexec/java_home ]]; then
+        local detected_home
+        detected_home="$(/usr/libexec/java_home 2>/dev/null || true)"
+        if validate_java_home "$detected_home"; then
+          JAVA_HOME="$detected_home"
+          export JAVA_HOME
+          log "JAVA_HOME detectado (macOS java_home): $JAVA_HOME"
+          return
+        fi
+      fi
+      
+      # Buscar en rutas comunes de Homebrew
+      local brew_paths=(
+        "/opt/homebrew/opt/openjdk"
+        "/opt/homebrew/opt/openjdk@17"
+        "/opt/homebrew/opt/openjdk@21"
+        "/opt/homebrew/opt/openjdk@19"
+        "/usr/local/opt/openjdk"
+        "/usr/local/opt/openjdk@17"
+        "/usr/local/opt/openjdk@21"
+        "/usr/local/opt/openjdk@19"
+      )
+      
+      for path in "${brew_paths[@]}"; do
+        # Verificar si el path existe y tiene java
+        if [[ -d "$path" ]]; then
+          # Buscar java en bin/ o en libexec/openjdk.jdk/Contents/Home/bin/
+          local java_bin=""
+          if [[ -x "$path/bin/java" ]]; then
+            java_bin="$path/bin/java"
+          elif [[ -d "$path/libexec" ]]; then
+            # Homebrew a veces instala en libexec/openjdk.jdk/Contents/Home/
+            local jdk_home
+            jdk_home="$(find "$path/libexec" -type d -path "*/Contents/Home" 2>/dev/null | head -n1)"
+            if validate_java_home "$jdk_home"; then
+              JAVA_HOME="$jdk_home"
+              export JAVA_HOME
+              log "JAVA_HOME detectado (Homebrew libexec): $JAVA_HOME"
+              return
+            fi
+          fi
+          if [[ -x "$path/bin/java" ]] && validate_java_home "$path"; then
+            JAVA_HOME="$path"
+            export JAVA_HOME
+            log "JAVA_HOME detectado (Homebrew): $JAVA_HOME"
+            return
+          fi
+        fi
+      done
+      
+      # Si java está en PATH, intentar derivar JAVA_HOME
+      if command -v java >/dev/null 2>&1; then
+        local java_path
+        java_path="$(command -v java)"
+        # Resolver symlinks (compatible con macOS y Linux)
+        if command -v realpath >/dev/null 2>&1; then
+          java_path="$(realpath "$java_path" 2>/dev/null || echo "$java_path")"
+        elif command -v readlink >/dev/null 2>&1; then
+          # En macOS, readlink no tiene -f, pero podemos intentar resolver manualmente
+          local resolved="$java_path"
+          local max_depth=10 depth=0
+          while [[ -L "$resolved" && $depth -lt $max_depth ]]; do
+            resolved="$(readlink "$resolved")"
+            if [[ "$resolved" != /* ]]; then
+              resolved="$(dirname "$java_path")/$resolved"
+            fi
+            depth=$((depth + 1))
+          done
+          java_path="$resolved"
+        fi
+        # java_path debería ser algo como /path/to/java/bin/java
+        if [[ "$java_path" == */bin/java ]]; then
+          local derived_home="${java_path%/bin/java}"
+          # Si está en Contents/Home, usar ese como JAVA_HOME
+          if [[ -d "$derived_home/Contents/Home" ]]; then
+            derived_home="$derived_home/Contents/Home"
+          fi
+          if validate_java_home "$derived_home"; then
+            JAVA_HOME="$derived_home"
+            export JAVA_HOME
+            log "JAVA_HOME derivado desde PATH: $JAVA_HOME"
+            return
+          else
+            warn "Ruta $derived_home no es un JDK válido, continuando búsqueda..."
+          fi
+        fi
+      fi
+      ;;
+    ubuntu|linux|wsl)
+      # En Linux, buscar en rutas comunes
+      local linux_paths=(
+        "/usr/lib/jvm/java-17-openjdk-$(uname -m)"
+        "/usr/lib/jvm/java-17-openjdk"
+        "/usr/lib/jvm/java-11-openjdk-$(uname -m)"
+        "/usr/lib/jvm/java-11-openjdk"
+        "/usr/lib/jvm/default-java"
+      )
+      
+      for path in "${linux_paths[@]}"; do
+        if validate_java_home "$path"; then
+          JAVA_HOME="$path"
+          export JAVA_HOME
+          log "JAVA_HOME detectado (Linux): $JAVA_HOME"
+          return
+        fi
+      done
+      
+      # Intentar derivar desde PATH
+      if command -v java >/dev/null 2>&1; then
+        local java_path
+        java_path="$(command -v java)"
+        # Resolver symlinks (compatible con macOS y Linux)
+        if command -v realpath >/dev/null 2>&1; then
+          java_path="$(realpath "$java_path" 2>/dev/null || echo "$java_path")"
+        elif command -v readlink >/dev/null 2>&1; then
+          # readlink -f funciona en Linux pero no en macOS
+          if readlink -f "$java_path" >/dev/null 2>&1; then
+            java_path="$(readlink -f "$java_path")"
+          else
+            # Fallback para macOS
+            local resolved="$java_path"
+            local max_depth=10 depth=0
+            while [[ -L "$resolved" && $depth -lt $max_depth ]]; do
+              resolved="$(readlink "$resolved")"
+              if [[ "$resolved" != /* ]]; then
+                resolved="$(dirname "$java_path")/$resolved"
+              fi
+              depth=$((depth + 1))
+            done
+            java_path="$resolved"
+          fi
+        fi
+        if [[ "$java_path" == */bin/java ]]; then
+          local derived_home="${java_path%/bin/java}"
+          if validate_java_home "$derived_home"; then
+            JAVA_HOME="$derived_home"
+            export JAVA_HOME
+            log "JAVA_HOME derivado desde PATH: $JAVA_HOME"
+            return
+          else
+            warn "Ruta $derived_home no es un JDK válido, continuando búsqueda..."
+          fi
+        fi
+      fi
+      ;;
+  esac
+  
+  # Si llegamos aquí, no se pudo detectar JAVA_HOME
+  if command -v java >/dev/null 2>&1; then
+    warn "Java está en PATH pero no se pudo detectar JAVA_HOME. sdkmanager puede fallar."
+    warn "Configura JAVA_HOME manualmente o instala Java con Homebrew (macOS) o apt (Linux)."
+  else
+    err "Java no está instalado ni en PATH. Instala Java antes de continuar."
+    exit 1
+  fi
+}
+
 ensure_java() {
   if command -v java >/dev/null 2>&1; then
     log "Java detectado."
+    setup_java_home
     return
   fi
   case "$OS_TYPE" in
@@ -168,11 +361,15 @@ ensure_java() {
       ensure_homebrew
       log "Instalando OpenJDK..."
       brew install openjdk
+      # Después de instalar, configurar JAVA_HOME
+      setup_java_home
       ;;
     ubuntu|linux|wsl)
       log "Instalando OpenJDK..."
       sudo apt-get update
       sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk curl unzip zip libglu1-mesa libpulse0
+      # Después de instalar, configurar JAVA_HOME
+      setup_java_home
       ;;
     *)
       err "Instala manualmente Java (OpenJDK 17+) antes de continuar."
@@ -353,31 +550,84 @@ ensure_paths() {
   export ANDROID_HOME
   export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
   export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+  # Asegurar que JAVA_HOME esté configurado y exportado
+  if [[ -n "${JAVA_HOME:-}" ]]; then
+    export JAVA_HOME
+  fi
 }
 
 ensure_sdkmanager() {
   ensure_paths
+  # Asegurar que JAVA_HOME esté configurado antes de usar sdkmanager
+  if [[ -z "${JAVA_HOME:-}" ]]; then
+    setup_java_home
+  fi
   if ! command -v sdkmanager >/dev/null 2>&1; then
     err "sdkmanager no encontrado tras instalar cmdline-tools."
     exit 1
+  fi
+  # Verificar que sdkmanager puede encontrar Java
+  if [[ -n "${JAVA_HOME:-}" ]]; then
+    log "Usando JAVA_HOME: $JAVA_HOME"
+  else
+    warn "JAVA_HOME no configurado. sdkmanager puede fallar si no encuentra Java en PATH."
   fi
 }
 
 accept_licenses() {
   log "Aceptando licencias de Android SDK..."
-  if ! yes | sdkmanager --licenses >/dev/null 2>&1; then
-    warn "No se pudieron aceptar todas las licencias automáticamente."
+  
+  # Validar JAVA_HOME antes de continuar
+  if [[ -z "${JAVA_HOME:-}" ]] || [[ ! -x "${JAVA_HOME}/bin/java" ]]; then
+    err "JAVA_HOME no está configurado correctamente: ${JAVA_HOME:-unset}"
     return 1
   fi
+  
+  # Usar timeout si está disponible (timeout en Linux/macOS con coreutils)
+  local timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout 60"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout 60"
+  fi
+  
+  # Intentar aceptar licencias con timeout
+  local license_output
+  license_output="$(mktemp)"
+  
+  if [[ -n "$timeout_cmd" ]]; then
+    if ! $timeout_cmd bash -c "yes | sdkmanager --licenses" >"$license_output" 2>&1; then
+      warn "No se pudieron aceptar todas las licencias automáticamente (timeout o error)."
+      cat "$license_output" >&2
+      rm -f "$license_output"
+      return 1
+    fi
+  else
+    # Sin timeout, usar yes con límite de líneas
+    if ! (yes | head -n 100 | sdkmanager --licenses) >"$license_output" 2>&1; then
+      warn "No se pudieron aceptar todas las licencias automáticamente."
+      cat "$license_output" >&2
+      rm -f "$license_output"
+      return 1
+    fi
+  fi
+  
+  rm -f "$license_output"
   return 0
 }
 
 install_sdk_components() {
   ensure_sdkmanager
   
+  # Validar JAVA_HOME antes de continuar
+  if [[ -z "${JAVA_HOME:-}" ]] || [[ ! -x "${JAVA_HOME}/bin/java" ]]; then
+    err "JAVA_HOME no está configurado correctamente: ${JAVA_HOME:-unset}"
+    err "sdkmanager requiere JAVA_HOME válido. Configura JAVA_HOME manualmente o instala Java con Homebrew."
+    exit 1
+  fi
+  
   # Aceptar licencias antes de instalar componentes (requerido para instalación no interactiva)
-  log "Aceptando licencias de Android SDK..."
-  if ! yes | sdkmanager --licenses >/dev/null 2>&1; then
+  if ! accept_licenses; then
     warn "No se pudieron aceptar todas las licencias automáticamente. Algunos componentes pueden fallar."
   fi
   
@@ -386,14 +636,31 @@ install_sdk_components() {
   log "Instalando componentes SDK (platform-tools, emulator, ${platform}, ${sys_image})..."
   
   # Capturar salida de sdkmanager para mejor diagnóstico
-  local sdk_output sdk_exit_code
+  local sdk_output sdk_exit_code timeout_cmd
   sdk_output="$(mktemp)"
   
+  # Usar timeout si está disponible
+  timeout_cmd=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_cmd="timeout 600"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_cmd="gtimeout 600"
+  fi
+  
   # sdkmanager a veces devuelve 141 (SIGPIPE) pese a instalar correctamente. Permitimos 0 o 141.
-  if yes | sdkmanager "platform-tools" "emulator" "$platform" "$sys_image" >"$sdk_output" 2>&1; then
-    sdk_exit_code=0
+  if [[ -n "$timeout_cmd" ]]; then
+    if $timeout_cmd bash -c "yes | sdkmanager \"platform-tools\" \"emulator\" \"$platform\" \"$sys_image\"" >"$sdk_output" 2>&1; then
+      sdk_exit_code=0
+    else
+      sdk_exit_code=$?
+    fi
   else
-    sdk_exit_code=$?
+    # Sin timeout, usar yes con límite de líneas
+    if (yes | head -n 200 | sdkmanager "platform-tools" "emulator" "$platform" "$sys_image") >"$sdk_output" 2>&1; then
+      sdk_exit_code=0
+    else
+      sdk_exit_code=$?
+    fi
   fi
   
   # Mostrar salida si hay problemas
@@ -401,6 +668,7 @@ install_sdk_components() {
     err "Salida de sdkmanager:"
     cat "$sdk_output" >&2
     err "sdkmanager falló instalando componentes (exit=$sdk_exit_code). Revisa conectividad y permisos."
+    err "JAVA_HOME actual: ${JAVA_HOME:-unset}"
     rm -f "$sdk_output"
     exit $sdk_exit_code
   fi
