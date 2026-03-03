@@ -235,9 +235,6 @@ download_cmdline_tools() {
   dest="$tmpdir/cmdline-tools.zip"
   stderr_file="$tmpdir/curl.stderr"
 
-  # Lista de intentos: override/env, dinámica de repository2-1.xml y fallback conocido.
-  local attempts=("$primary_url")
-
   # Intento dinámico: descubrir la última versión publicada en repository2-1.xml
   resolve_latest_cmdline_url_for_os() {
     local os_tag="$1" tmp xml_url resolved
@@ -259,6 +256,10 @@ download_cmdline_tools() {
     return 1
   }
 
+  # Lista de intentos: priorizar URL dinámica (más reciente), luego override/env, y finalmente fallback conocido.
+  local attempts=()
+  local dynamic_url=""
+
   if dynamic_url="$(resolve_latest_cmdline_url_for_os "$([[ "$OS_TYPE" == "macos" ]] && echo "mac" || echo "linux")")"; then
     if [[ "$dynamic_url" != "$primary_url" && "$dynamic_url" != "$fallback_url" ]]; then
       log "URL dinámica detectada para cmdline-tools: $dynamic_url"
@@ -268,7 +269,13 @@ download_cmdline_tools() {
     warn "No se pudo resolver URL dinámica desde repository2-1.xml; usando fallback conocido."
   fi
 
-  if [[ "$fallback_url" != "$primary_url" && -n "$fallback_url" ]]; then
+  # Agregar URL primaria (override/env) si es diferente a la dinámica
+  if [[ -n "$primary_url" && "$primary_url" != "$dynamic_url" ]]; then
+    attempts+=("$primary_url")
+  fi
+
+  # Agregar fallback si es diferente a las anteriores
+  if [[ "$fallback_url" != "$primary_url" && "$fallback_url" != "$dynamic_url" && -n "$fallback_url" ]]; then
     attempts+=("$fallback_url")
   fi
 
@@ -357,24 +364,52 @@ ensure_sdkmanager() {
 }
 
 accept_licenses() {
-  yes | sdkmanager --licenses >/dev/null
+  log "Aceptando licencias de Android SDK..."
+  if ! yes | sdkmanager --licenses >/dev/null 2>&1; then
+    warn "No se pudieron aceptar todas las licencias automáticamente."
+    return 1
+  fi
+  return 0
 }
 
 install_sdk_components() {
   ensure_sdkmanager
+  
+  # Aceptar licencias antes de instalar componentes (requerido para instalación no interactiva)
+  log "Aceptando licencias de Android SDK..."
+  if ! yes | sdkmanager --licenses >/dev/null 2>&1; then
+    warn "No se pudieron aceptar todas las licencias automáticamente. Algunos componentes pueden fallar."
+  fi
+  
   local platform="platforms;android-${API_LEVEL}"
   local sys_image="system-images;android-${API_LEVEL};google_apis;${ABI}"
   log "Instalando componentes SDK (platform-tools, emulator, ${platform}, ${sys_image})..."
+  
+  # Capturar salida de sdkmanager para mejor diagnóstico
+  local sdk_output sdk_exit_code
+  sdk_output="$(mktemp)"
+  
   # sdkmanager a veces devuelve 141 (SIGPIPE) pese a instalar correctamente. Permitimos 0 o 141.
-  if ! yes | sdkmanager "platform-tools" "emulator" "$platform" "$sys_image"; then
-    local code=$?
-    if [[ $code -eq 141 ]]; then
-      warn "sdkmanager terminó con código 141 (SIGPIPE) pero puede haber instalado paquetes; continuando."
-    else
-      err "sdkmanager falló instalando componentes (exit=$code). Revisa conectividad y permisos."
-      exit $code
-    fi
+  if yes | sdkmanager "platform-tools" "emulator" "$platform" "$sys_image" >"$sdk_output" 2>&1; then
+    sdk_exit_code=0
+  else
+    sdk_exit_code=$?
   fi
+  
+  # Mostrar salida si hay problemas
+  if [[ $sdk_exit_code -ne 0 && $sdk_exit_code -ne 141 ]]; then
+    err "Salida de sdkmanager:"
+    cat "$sdk_output" >&2
+    err "sdkmanager falló instalando componentes (exit=$sdk_exit_code). Revisa conectividad y permisos."
+    rm -f "$sdk_output"
+    exit $sdk_exit_code
+  fi
+  
+  if [[ $sdk_exit_code -eq 141 ]]; then
+    warn "sdkmanager terminó con código 141 (SIGPIPE) pero puede haber instalado paquetes; continuando."
+  fi
+  
+  rm -f "$sdk_output"
 }
 
 components_installed() {
