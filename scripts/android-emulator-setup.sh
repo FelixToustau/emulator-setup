@@ -246,6 +246,23 @@ install_sdk_components() {
   fi
 }
 
+components_installed() {
+  local missing=()
+
+  [[ -x "$ANDROID_HOME/platform-tools/adb" ]] || missing+=("platform-tools")
+  [[ -x "$ANDROID_HOME/emulator/emulator" ]]   || missing+=("emulator")
+  [[ -d "$ANDROID_HOME/platforms/android-${API_LEVEL}" ]] || missing+=("platforms;android-${API_LEVEL}")
+  [[ -d "$ANDROID_HOME/system-images/android-${API_LEVEL}/google_apis/${ABI}" ]] || missing+=("system-images;android-${API_LEVEL};google_apis;${ABI}")
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    log "Componentes SDK requeridos ya presentes; se omite instalación."
+    return 0
+  else
+    warn "Faltan componentes SDK: ${missing[*]}"
+    return 1
+  fi
+}
+
 list_system_images() {
   ensure_sdkmanager
   sdkmanager --list | grep "system-images;android-" || true
@@ -369,8 +386,12 @@ main() {
     exit 0
   fi
 
-  stage "instalacion-sdk"
-  install_sdk_components
+  if components_installed; then
+    log "Saltando descarga de componentes; continuando."
+  else
+    stage "instalacion-sdk"
+    install_sdk_components
+  fi
   stage "creacion-avd"
   create_avd
   if [[ "$START_EMULATOR" == "true" ]]; then
