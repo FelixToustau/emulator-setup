@@ -2,6 +2,18 @@
 
 Scripts Bash multiplataforma para instalar o borrar un emulador (AVD) en macOS, Ubuntu o Windows vía WSL.
 
+## Requisitos previos
+
+- **Bash** y permisos de ejecución en el script (p. ej. `chmod +x scripts/android-emulator-setup.sh`).
+- **Conexión a internet** (descargas del SDK, cmdline-tools, etc.).
+- **macOS**: se recomienda tener **Homebrew** instalado; el script puede instalarlo si falta. Si quieres instalarlo tú mismo:
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+- **Ubuntu/WSL**: se necesita `sudo` y `apt` para instalar OpenJDK y dependencias.
+
+Con esto, el script se encarga de instalar **Java (OpenJDK 17)** automáticamente si no está presente.
+
 ## Uso rápido
 - Instalar y crear/arrancar el AVD por defecto:
   ```bash

@@ -146,7 +146,17 @@ detect_android_studio_and_sdk() {
 }
 
 ensure_homebrew() {
+  # Si brew ya está en PATH, listo
   if command -v brew >/dev/null 2>&1; then
+    return
+  fi
+  # Si Homebrew está instalado pero no en PATH (p. ej. misma sesión tras instalar), cargar entorno
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+    return
+  fi
+  if [[ -x /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
     return
   fi
   if [[ "$AUTO_YES" == "false" ]]; then
@@ -155,7 +165,13 @@ ensure_homebrew() {
   fi
   log "Instalando Homebrew..."
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  log "Homebrew instalado. Reinicia tu shell si los binarios no son visibles."
+  # Cargar Homebrew en esta sesión para usar brew sin reiniciar la shell
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [[ -x /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+  fi
+  log "Homebrew instalado."
 }
 
 setup_java_home() {
@@ -280,6 +296,10 @@ setup_java_home() {
           fi
         fi
       fi
+      # Último intento en macOS: usar brew --prefix (evita bucle si openjdk@17 ya está instalado)
+      if command -v brew >/dev/null 2>&1 && set_java_home_from_brew; then
+        return
+      fi
       ;;
     ubuntu|linux|wsl)
       # En Linux, buscar en rutas comunes
@@ -344,10 +364,121 @@ setup_java_home() {
   if command -v java >/dev/null 2>&1; then
     warn "Java está en PATH pero no se pudo detectar JAVA_HOME. sdkmanager puede fallar."
     warn "Configura JAVA_HOME manualmente o instala Java con Homebrew (macOS) o apt (Linux)."
+    
+    # Intentar instalar Java automáticamente si es posible
+    case "$OS_TYPE" in
+      macos)
+        if command -v brew >/dev/null 2>&1; then
+          if [[ "$AUTO_YES" == "true" ]]; then
+            log "Intentando instalar OpenJDK 17 con Homebrew..."
+            ensure_homebrew
+            brew install openjdk@17 || brew install openjdk
+            if set_java_home_from_brew; then
+              return
+            fi
+            setup_java_home
+            return
+          else
+            err "Para instalar Java automáticamente, ejecuta:"
+            err "  brew install openjdk@17"
+            err "O configura JAVA_HOME manualmente apuntando a tu instalación de JDK."
+          fi
+        else
+          err "Para instalar Java, primero instala Homebrew y luego ejecuta:"
+          err "  brew install openjdk@17"
+          err "O configura JAVA_HOME manualmente apuntando a tu instalación de JDK."
+        fi
+        ;;
+      ubuntu|linux|wsl)
+        if [[ "$AUTO_YES" == "true" ]]; then
+          log "Intentando instalar OpenJDK 17..."
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk
+          setup_java_home
+          return
+        else
+          err "Para instalar Java automáticamente, ejecuta:"
+          err "  sudo apt-get update && sudo apt-get install -y openjdk-17-jdk"
+          err "O configura JAVA_HOME manualmente apuntando a tu instalación de JDK."
+        fi
+        ;;
+      *)
+        err "Instala Java (OpenJDK 17+) manualmente antes de continuar."
+        ;;
+    esac
   else
     err "Java no está instalado ni en PATH. Instala Java antes de continuar."
-    exit 1
+    
+    # Intentar instalar Java automáticamente si es posible
+    case "$OS_TYPE" in
+      macos)
+        if command -v brew >/dev/null 2>&1; then
+          if [[ "$AUTO_YES" == "true" ]]; then
+            log "Intentando instalar OpenJDK 17 con Homebrew..."
+            ensure_homebrew
+            brew install openjdk@17 || brew install openjdk
+            if set_java_home_from_brew; then
+              return
+            fi
+            setup_java_home
+            return
+          else
+            err "Para instalar Java automáticamente, ejecuta:"
+            err "  brew install openjdk@17"
+            err "O ejecuta el script con --yes para instalación automática."
+          fi
+        else
+          err "Para instalar Java, primero instala Homebrew y luego ejecuta:"
+          err "  brew install openjdk@17"
+          err "O ejecuta el script con --yes para instalación automática."
+        fi
+        exit 1
+        ;;
+      ubuntu|linux|wsl)
+        if [[ "$AUTO_YES" == "true" ]]; then
+          log "Intentando instalar OpenJDK 17..."
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk
+          setup_java_home
+          return
+        else
+          err "Para instalar Java automáticamente, ejecuta:"
+          err "  sudo apt-get update && sudo apt-get install -y openjdk-17-jdk"
+          err "O ejecuta el script con --yes para instalación automática."
+        fi
+        exit 1
+        ;;
+      *)
+        err "Instala Java (OpenJDK 17+) manualmente antes de continuar."
+        exit 1
+        ;;
+    esac
   fi
+}
+
+set_java_home_from_brew() {
+  # Establece JAVA_HOME desde la instalación de Homebrew (misma sesión, sin depender de PATH).
+  local prefix jdk_home
+  for pkg in openjdk@17 openjdk@21 openjdk; do
+    prefix="$(brew --prefix "$pkg" 2>/dev/null)" || continue
+    [[ -d "$prefix" ]] || continue
+    if [[ -x "$prefix/bin/java" ]] && [[ -d "$prefix/lib" || -d "$prefix/jre" ]]; then
+      JAVA_HOME="$prefix"
+      export JAVA_HOME
+      export PATH="$JAVA_HOME/bin:$PATH"
+      log "JAVA_HOME configurado desde Homebrew ($pkg): $JAVA_HOME"
+      return 0
+    fi
+    jdk_home="$(find "$prefix/libexec" -type d -path "*/Contents/Home" 2>/dev/null | head -n1)"
+    if [[ -n "$jdk_home" && -x "$jdk_home/bin/java" ]]; then
+      JAVA_HOME="$jdk_home"
+      export JAVA_HOME
+      export PATH="$JAVA_HOME/bin:$PATH"
+      log "JAVA_HOME configurado desde Homebrew ($pkg): $JAVA_HOME"
+      return 0
+    fi
+  done
+  return 1
 }
 
 ensure_java() {
@@ -359,9 +490,12 @@ ensure_java() {
   case "$OS_TYPE" in
     macos)
       ensure_homebrew
-      log "Instalando OpenJDK..."
-      brew install openjdk
-      # Después de instalar, configurar JAVA_HOME
+      log "Instalando OpenJDK 17..."
+      brew install openjdk@17 || brew install openjdk
+      # Fijar JAVA_HOME en esta sesión (brew no siempre añade java al PATH de la misma corrida)
+      if set_java_home_from_brew; then
+        return
+      fi
       setup_java_home
       ;;
     ubuntu|linux|wsl)
@@ -591,25 +725,21 @@ accept_licenses() {
     timeout_cmd="gtimeout 60"
   fi
   
-  # Intentar aceptar licencias con timeout
-  local license_output
+  # Intentar aceptar licencias con timeout (141 = SIGPIPE cuando yes termina, es éxito)
+  local license_output license_exit=0
   license_output="$(mktemp)"
   
   if [[ -n "$timeout_cmd" ]]; then
-    if ! $timeout_cmd bash -c "yes | sdkmanager --licenses" >"$license_output" 2>&1; then
-      warn "No se pudieron aceptar todas las licencias automáticamente (timeout o error)."
-      cat "$license_output" >&2
-      rm -f "$license_output"
-      return 1
-    fi
+    $timeout_cmd bash -c "yes | sdkmanager --licenses" >"$license_output" 2>&1 || license_exit=$?
   else
-    # Sin timeout, usar yes con límite de líneas
-    if ! (yes | head -n 100 | sdkmanager --licenses) >"$license_output" 2>&1; then
-      warn "No se pudieron aceptar todas las licencias automáticamente."
-      cat "$license_output" >&2
-      rm -f "$license_output"
-      return 1
-    fi
+    (yes | head -n 200 | sdkmanager --licenses) >"$license_output" 2>&1 || license_exit=$?
+  fi
+  
+  if [[ $license_exit -ne 0 && $license_exit -ne 141 ]]; then
+    warn "No se pudieron aceptar todas las licencias automáticamente (exit=$license_exit)."
+    cat "$license_output" >&2
+    rm -f "$license_output"
+    return 1
   fi
   
   rm -f "$license_output"
@@ -622,8 +752,65 @@ install_sdk_components() {
   # Validar JAVA_HOME antes de continuar
   if [[ -z "${JAVA_HOME:-}" ]] || [[ ! -x "${JAVA_HOME}/bin/java" ]]; then
     err "JAVA_HOME no está configurado correctamente: ${JAVA_HOME:-unset}"
-    err "sdkmanager requiere JAVA_HOME válido. Configura JAVA_HOME manualmente o instala Java con Homebrew."
-    exit 1
+    err "sdkmanager requiere JAVA_HOME válido."
+    
+    # Intentar instalar/configurar Java automáticamente
+    case "$OS_TYPE" in
+      macos)
+        if command -v brew >/dev/null 2>&1; then
+          if [[ "$AUTO_YES" == "true" ]]; then
+            log "Intentando instalar OpenJDK 17 con Homebrew..."
+            ensure_homebrew
+            brew install openjdk@17 || brew install openjdk
+            set_java_home_from_brew || true
+            setup_java_home
+            # Verificar nuevamente después de la instalación
+            if [[ -z "${JAVA_HOME:-}" ]] || [[ ! -x "${JAVA_HOME}/bin/java" ]]; then
+              err "JAVA_HOME aún no está configurado después de instalar Java."
+              err "Para configurar manualmente, ejecuta:"
+              err "  brew install openjdk@17"
+              err "  export JAVA_HOME=\$(/usr/libexec/java_home -v 17)"
+              exit 1
+            fi
+          else
+            err "Para instalar Java automáticamente, ejecuta:"
+            err "  brew install openjdk@17"
+            err "O ejecuta el script con --yes para instalación automática."
+            exit 1
+          fi
+        else
+          err "Para instalar Java, primero instala Homebrew y luego ejecuta:"
+          err "  brew install openjdk@17"
+          err "O ejecuta el script con --yes para instalación automática."
+          exit 1
+        fi
+        ;;
+      ubuntu|linux|wsl)
+        if [[ "$AUTO_YES" == "true" ]]; then
+          log "Intentando instalar OpenJDK 17..."
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk
+          setup_java_home
+          # Verificar nuevamente después de la instalación
+          if [[ -z "${JAVA_HOME:-}" ]] || [[ ! -x "${JAVA_HOME}/bin/java" ]]; then
+            err "JAVA_HOME aún no está configurado después de instalar Java."
+            err "Para configurar manualmente, ejecuta:"
+            err "  sudo apt-get update && sudo apt-get install -y openjdk-17-jdk"
+            err "  export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-\$(uname -m)"
+            exit 1
+          fi
+        else
+          err "Para instalar Java automáticamente, ejecuta:"
+          err "  sudo apt-get update && sudo apt-get install -y openjdk-17-jdk"
+          err "O ejecuta el script con --yes para instalación automática."
+          exit 1
+        fi
+        ;;
+      *)
+        err "Instala Java (OpenJDK 17+) manualmente antes de continuar."
+        exit 1
+        ;;
+    esac
   fi
   
   # Aceptar licencias antes de instalar componentes (requerido para instalación no interactiva)
@@ -788,7 +975,7 @@ parse_args() {
       --device) DEVICE_ID="$2"; shift ;;
       --abi) ABI="$2"; ABI_SET="true"; shift ;;
       --headless) HEADLESS="true" ;;
-      --start) START_EMULATOR="true" ;;
+      --start) START_EMULATOR="true"; AUTO_YES="true" ;;
       --list-system-images) LIST_IMAGES_ONLY="true" ;;
       --yes) AUTO_YES="true" ;;
       --help|-h) usage; exit 0 ;;

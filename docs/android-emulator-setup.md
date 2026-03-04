@@ -3,9 +3,14 @@
 Script Bash multiplataforma para instalar el SDK de Android y preparar un emulador listo para usar (AVD) con la menor fricción posible.
 
 ## Requisitos rápidos
-- macOS, Ubuntu o Windows vía WSL.
-- Conectividad a internet para descargar SDK y dependencias.
-- Virtualización habilitada (VT-x/AMD-V) para ejecutar el emulador.
+- **Bash**, macOS, Ubuntu o Windows vía WSL.
+- **Conexión a internet** para descargar SDK y dependencias.
+- **Virtualización habilitada** (VT-x/AMD-V) para ejecutar el emulador.
+- **macOS**: se recomienda tener **Homebrew**; si no está instalado, el script puede instalarlo o puedes hacerlo con:
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+- El script instala **Java (OpenJDK 17)** automáticamente si no está presente.
 
 ## Uso básico
 ```bash
